@@ -1,0 +1,42 @@
+# --- Security & Credentials ---
+# NEVER commit these to version control
+.env
+.env.*
+*.pem
+secrets.json
+
+# --- Python & FastAPI Caches ---
+# Blocks compiled bytecode and runtime caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- Virtual Environments ---
+# Blocks the massive dependency folders (forces users to use requirements.txt)
+venv/
+env/
+ENV/
+.venv/
+
+# --- macOS System Files ---
+# Blocks hidden desktop indexing files created by Apple Silicon Macs
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+
+# --- IDEs & Editors ---
+# Blocks local workspace settings from VS Code or PyCharm
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Project Specific (PyMat Translator) ---
+# Blocks the temporary JSON and MAT files generated during sandbox execution
+/shared/
+*.mat
+output_data.json
