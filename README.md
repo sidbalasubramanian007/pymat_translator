@@ -25,21 +25,21 @@ Unlike standard LLM wrappers, this pipeline utilizes **Agentic Reflection** and 
    cd pymat-translator
 2. Create a virtual environment and download all the dependencies:
 
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+   ```
 
 3. Set your API key in your terminal session (or .env file):
 
-export GEMINI_API_KEY="your_api_key_here"
+   export GEMINI_API_KEY="your_api_key_here"
 
 4. Boot the FastAPI server:
 
-```bash
-uvicorn main:app --reload
-```
+   ```bash
+   uvicorn main:app --reload
+   ```
 
 Open the interactive testing dashboard at http://127.0.0.1:8000/docs.
 
