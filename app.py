@@ -4,8 +4,8 @@ import requests
 # Set up the page layout
 st.set_page_config(page_title="PyMat Translator", layout="wide")
 
-st.title("🚀 PyMat Agentic Translator")
-st.markdown("Deterministic Python-to-MATLAB compilation using Agentic Reflection.")
+st.title("PyMat Translator")
+st.markdown("Automatic Self-Correcting Python-to-MATLAB Translator.")
 st.markdown("---")
 
 # Create a split-screen layout
@@ -48,11 +48,11 @@ with col2:
         
         # Verification Badges
         if report['equivalent']:
-            st.success(f"✅ Mathematically Verified! (Self-Correction Retries: {report['retries_used']})")
+            st.success(f"Mathematically Verified! (Self-Correction Retries: {report['retries_used']})")
             if report['matched_variables']:
                 st.info(f"Matched Tensors: {', '.join(report['matched_variables'])}")
         else:
-            st.error("❌ Verification Failed (Math Mismatch)")
+            st.error("Verification Failed (Math Mismatch)")
             st.json(report['mismatches'])
     else:
         st.info("Awaiting compilation...")
