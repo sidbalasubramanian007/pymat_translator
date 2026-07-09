@@ -59,6 +59,10 @@ async def translate_and_verify(request: TranslationRequest):
     if not py_result["success"]:
         raise HTTPException(status_code=400, detail=f"Invalid Python Code: {py_result['logs']}")
 
+    # Defaults in case every attempt crashes before reaching the verifier
+    matlab_candidate = ""
+    ver_report = {"equivalent": False, "mismatches": [], "matched_variables": []}
+
     # Step 2: The Agentic Loop
     while current_attempt <= max_retries:
         try:
@@ -85,6 +89,15 @@ async def translate_and_verify(request: TranslationRequest):
             mat_result = sandbox.run_octave_and_collect_data(matlab_candidate)
             if not mat_result["success"]:
                 # Syntax error! Feed the crash log back to Gemini
+                ver_report = {
+                    "equivalent": False,
+                    "mismatches": [{
+                        "variable": None,
+                        "reason": "Octave Crash",
+                        "details": mat_result["logs"]
+                    }],
+                    "matched_variables": []
+                }
                 conversation_context += f"\nError: Your code crashed with this log: {mat_result['logs']}. Please fix it.\n"
                 current_attempt += 1
                 continue
