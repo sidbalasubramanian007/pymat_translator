@@ -5,12 +5,36 @@ import json
 import scipy.io
 import numpy as np
 import shutil
+import traceback
+import requests
 
 # Initialize the Docker client
 try:
     client = docker.from_env()
 except Exception as e:
     print(f"Error initializing Docker: {e}")
+
+def _run_container(image: str, command: str, volumes: dict, **kwargs):
+    """
+    Runs a detached container to completion and always removes it.
+    Returns (status_code, stdout_bytes, stderr_bytes); status_code is None on timeout.
+    """
+    timeout = int(os.environ.get("PYMAT_SANDBOX_TIMEOUT", "60"))
+    container = client.containers.run(image, command=command, volumes=volumes, detach=True, **kwargs)
+    try:
+        try:
+            status_code = container.wait(timeout=timeout)["StatusCode"]
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError):
+            try:
+                container.kill()
+            except docker.errors.APIError:
+                pass  # Exited between the timeout and the kill
+            status_code = None
+        stdout = container.logs(stdout=True, stderr=False)
+        stderr = container.logs(stdout=False, stderr=True)
+        return status_code, stdout, stderr
+    finally:
+        container.remove(force=True)
 
 def run_python_and_collect_data(user_code: str) -> dict:
     """
@@ -54,33 +78,32 @@ with open('/tmp/output_data.json', 'w') as f:
         temp_json_path = temp_json.name
 
     try:
-        container_logs = client.containers.run(
+        status_code, stdout, stderr = _run_container(
             "python:3.10-slim",
             command="sh -c 'pip install numpy > /dev/null 2>&1 && python /tmp/script.py'",
             volumes={
                 temp_script_path: {'bind': '/tmp/script.py', 'mode': 'ro'},
                 temp_json_path: {'bind': '/tmp/output_data.json', 'mode': 'rw'}
-            },
-            remove=True,
-            stdout=True,
-            stderr=True
+            }
         )
-        
+        if status_code is None:
+            return {"success": False, "logs": stderr.decode('utf-8', 'replace'), "data": {}, "error": "Timeout"}
+        if status_code != 0:
+            return {"success": False, "logs": stderr.decode('utf-8', 'replace'), "data": {}, "error": "Runtime Exception"}
+
         with open(temp_json_path, 'r') as f:
             content = f.read()
             collected_data = json.loads(content) if content else {}
-            
+
         return {
             "success": True,
-            "logs": container_logs.decode('utf-8'),
+            "logs": (stdout + stderr).decode('utf-8', 'replace'),
             "data": collected_data,
             "error": None
         }
 
-    except docker.errors.ContainerError as e:
-        return {"success": False, "logs": e.stderr.decode('utf-8'), "data": {}, "error": "Runtime Exception"}
     except Exception as e:
-        return {"success": False, "logs": "", "data": {}, "error": str(e)}
+        return {"success": False, "logs": traceback.format_exc(), "data": {}, "error": str(e)}
     finally:
         if os.path.exists(temp_script_path):
             os.remove(temp_script_path)
@@ -107,18 +130,19 @@ def run_octave_and_collect_data(user_code: str) -> dict:
 
     try:
         # Mount the entire directory to '/shared' inside the container
-        container_logs = client.containers.run(
+        status_code, stdout, stderr = _run_container(
             "gnuoctave/octave:latest",
             command="octave --no-gui --quiet /shared/script.m",
             volumes={
                 host_shared_dir: {'bind': '/shared', 'mode': 'rw'}
             },
-            remove=True,
-            stdout=True,
-            stderr=True,
             platform="linux/amd64"
         )
-        
+        if status_code is None:
+            return {"success": False, "logs": stderr.decode('utf-8', 'replace'), "data": {}, "error": "Timeout"}
+        if status_code != 0:
+            return {"success": False, "logs": stderr.decode('utf-8', 'replace'), "data": {}, "error": "Runtime Exception"}
+
         # Parse the .mat file using SciPy
         mat_contents = scipy.io.loadmat(temp_mat_path)
         collected_data = {}
@@ -138,15 +162,13 @@ def run_octave_and_collect_data(user_code: str) -> dict:
                         
         return {
             "success": True,
-            "logs": container_logs.decode('utf-8'),
+            "logs": (stdout + stderr).decode('utf-8', 'replace'),
             "data": collected_data,
             "error": None
         }
 
-    except docker.errors.ContainerError as e:
-        return {"success": False, "logs": e.stderr.decode('utf-8'), "data": {}, "error": "Runtime Exception"}
     except Exception as e:
-        return {"success": False, "logs": "", "data": {}, "error": str(e)}
+        return {"success": False, "logs": traceback.format_exc(), "data": {}, "error": str(e)}
     finally:
         # Clean up the entire temporary directory from your Mac
         if os.path.exists(host_shared_dir):
