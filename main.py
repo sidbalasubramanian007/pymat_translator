@@ -14,6 +14,8 @@ base_dir = Path(__file__).resolve().parent
 env_path = base_dir / ".env"
 load_dotenv(dotenv_path=env_path, override=True)
 
+MAX_RETRIES = int(os.environ.get("PYMAT_MAX_RETRIES", "3"))
+
 app = FastAPI(title="PyMat Agentic Translator")
 
 # The SDK automatically checks os.environ["GEMINI_API_KEY"] if left completely blank!
@@ -44,7 +46,6 @@ class FinalResponse(BaseModel):
 
 @app.post("/api/v1/translate_and_verify", response_model=FinalResponse)
 async def translate_and_verify(request: TranslationRequest):
-    max_retries = 1
     current_attempt = 0
     
     # We build a continuous prompt string to maintain conversation history
@@ -64,7 +65,7 @@ async def translate_and_verify(request: TranslationRequest):
     ver_report = {"equivalent": False, "mismatches": [], "matched_variables": []}
 
     # Step 2: The Agentic Loop
-    while current_attempt <= max_retries:
+    while current_attempt <= MAX_RETRIES:
         try:
             # 1. Ask Gemini for translation using Structured Outputs
             response = client.models.generate_content(
