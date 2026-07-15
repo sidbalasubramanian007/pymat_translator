@@ -24,9 +24,16 @@ def verify_semantic_equivalence(python_data: dict, matlab_data: dict, epsilon: f
             continue
             
         mat_info = matlab_data[var_name]
-        
+
+        # Octave reports every 1-element array as a scalar (e.g. np.array([5]) comes back as scalar 5)
+        single_element_scalar = (
+            py_info["type"] == "ndarray"
+            and int(np.prod(py_info.get("shape", []))) == 1
+            and mat_info["type"] == "scalar"
+        )
+
         # 1. Verify structural type matching
-        if py_info["type"] != mat_info["type"] and not (py_info["type"] == "ndarray" and mat_info["type"] == "array"):
+        if py_info["type"] != mat_info["type"] and not single_element_scalar and not (py_info["type"] == "ndarray" and mat_info["type"] == "array"):
             report["equivalent"] = False
             report["mismatches"].append({
                 "variable": var_name,
@@ -36,7 +43,7 @@ def verify_semantic_equivalence(python_data: dict, matlab_data: dict, epsilon: f
             continue
 
         # 2. Verify array dimensionality shapes
-        if py_info["type"] == "ndarray":
+        if py_info["type"] == "ndarray" and not single_element_scalar:
             py_shape = py_info.get("shape", [])
             mat_shape = mat_info.get("shape", [])
             
@@ -101,3 +108,11 @@ if __name__ == "__main__":
     test_report = verify_semantic_equivalence(mock_python, mock_matlab_buggy)
     import json
     print(json.dumps(test_report, indent=2))
+
+    # 1-element NumPy arrays vs Octave scalars should be compatible and value-compared
+    mock_python_single = {"k": {"type": "ndarray", "shape": [1], "data": [5]}}
+    single_ok = verify_semantic_equivalence(mock_python_single, {"k": {"type": "scalar", "data": 5.0}})
+    single_bad = verify_semantic_equivalence(mock_python_single, {"k": {"type": "scalar", "data": 6.0}})
+    assert single_ok["equivalent"] and single_ok["matched_variables"] == ["k"], single_ok
+    assert not single_bad["equivalent"] and single_bad["mismatches"][0]["reason"] == "Value Divergence", single_bad
+    print("1-element array vs scalar check passed.")
