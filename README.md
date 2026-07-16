@@ -21,8 +21,10 @@ Unlike standard LLM wrappers, this pipeline utilizes **Agentic Reflection** and 
 ### Installation
 1. Clone the repository:
    ```bash
-   git clone [https://github.com/yourusername/pymat-translator.git](https://github.com/yourusername/pymat-translator.git)
-   cd pymat-translator
+   git clone https://github.com/sidbalasubramanian007/pymat_translator.git
+   cd pymat_translator
+   ```
+
 2. Create a virtual environment and download all the dependencies:
 
    ```bash
