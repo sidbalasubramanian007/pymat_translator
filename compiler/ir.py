@@ -74,8 +74,15 @@ class UnaryOp(Expr):
 
 
 @dataclass
+class Tuple(Expr):
+    # Fixed-size sequence of values, e.g. a shape argument like (2, 3)
+    elements: list[Expr]
+
+
+@dataclass
 class Call(Expr):
-    func: Expr
+    # Dotted name of the callee, e.g. "np.zeros"
+    func: str
     args: list[Expr] = field(default_factory=list)
     kwargs: dict[str, Expr] = field(default_factory=dict)
 
