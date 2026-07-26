@@ -19,8 +19,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, Union
 
-# A dimension of None means the size is unknown
-Shape = tuple[int | None, ...]
+# "scalar", or a tuple of dims where a dim of None means that size is unknown
+Shape = Union[Literal["scalar"], tuple[int | None, ...]]
 
 BinOpKind = Literal["add", "sub", "mul", "div", "pow", "matmul"]
 UnaryOpKind = Literal["neg", "pos", "not"]
