@@ -1,7 +1,10 @@
+import itertools
+
+import numpy as np
 import pytest
 
 from compiler.frontend import lower
-from compiler.ir import ArrayLiteral, Assign, Const, Module, Name
+from compiler.ir import ArrayLiteral, Assign, Const, Index, Module, Name, Slice, UnaryOp
 from compiler.shapes import infer
 
 
@@ -92,11 +95,11 @@ def test_reassignment_uses_latest_shape():
 
 @pytest.mark.parametrize("source", [
     "y = a + b",
-    "y = np.zeros((2, 3))",
+    "y = a @ b",
     "y = a[0]",
     "y = a.T",
 ])
-def test_other_nodes_are_unknown_for_now(source):
+def test_nodes_over_unknown_names_are_unknown(source):
     _, symbols = infer_source(source)
     assert symbols == {"y": None}
 
@@ -112,3 +115,177 @@ def test_nested_literal_inside_other_node_is_annotated():
 def test_unsupported_statements_are_skipped():
     _, symbols = infer_source("x = 1\nfor i in range(3):\n    x = x * 2\ny = x")
     assert symbols == {"x": "scalar", "y": "scalar"}
+
+
+# --- Derived shapes ---
+
+def shape_of(setup, expr):
+    """Shape of `expr` after running the `setup` statements."""
+    _, symbols = infer_source(f"{setup}\n__result = {expr}")
+    return symbols["__result"]
+
+
+A23 = "a = np.zeros((2, 3))"
+
+
+@pytest.mark.parametrize("op", ["+", "-", "*", "/", "**"])
+def test_elementwise_scalar_with_array(op):
+    assert shape_of(A23, f"2 {op} a") == (2, 3)
+    assert shape_of(A23, f"a {op} 2") == (2, 3)
+
+
+def test_elementwise_scalar_with_scalar():
+    assert shape_of("x = 1", "x * 2.5") == "scalar"
+
+
+def test_elementwise_same_shape():
+    assert shape_of(A23, "a + a") == (2, 3)
+
+
+def test_broadcasting_column_and_row():
+    assert shape_of("c = np.zeros((3, 1))\nr = np.ones(4)", "c + r") == (3, 4)
+
+
+def test_broadcasting_pads_leading_dims():
+    assert shape_of(A23 + "\nr = np.array([1, 2, 3])", "a * r") == (2, 3)
+
+
+def test_broadcasting_incompatible_is_none():
+    assert shape_of("x = np.zeros(3)\ny = np.zeros(4)", "x + y") is None
+    assert shape_of(A23 + "\nb = np.zeros((3, 2))", "a - b") is None
+
+
+def test_broadcasting_keeps_unknown_dims_unknown():
+    # a[:n] with unknown n has an unknown first dim
+    setup = "a = np.zeros((5, 3))\nb = a[:n]"
+    assert shape_of(setup, "b") == (None, 3)
+    assert shape_of(setup, "b + np.ones(3)") == (None, 3)
+
+
+def test_elementwise_with_unknown_operand_is_none():
+    assert shape_of(A23, "a + unknown") is None
+
+
+@pytest.mark.parametrize("left, right, expected", [
+    ("np.ones(3)", "np.ones(3)", "scalar"),
+    ("np.ones((2, 3))", "np.ones(3)", (2,)),
+    ("np.ones(3)", "np.ones((3, 4))", (4,)),
+    ("np.ones((2, 3))", "np.ones((3, 4))", (2, 4)),
+])
+def test_matmul(left, right, expected):
+    assert shape_of("", f"{left} @ {right}") == expected
+
+
+@pytest.mark.parametrize("left, right", [
+    ("np.ones((2, 3))", "np.ones((2, 3))"),  # Inner dims 3 vs 2
+    ("np.ones(3)", "np.ones(4)"),
+    ("2", "np.ones(3)"),  # Scalars aren't allowed with @
+])
+def test_matmul_invalid_is_none(left, right):
+    assert shape_of("", f"{left} @ {right}") is None
+
+
+@pytest.mark.parametrize("op, expected", [("neg", (2, 3)), ("pos", (2, 3)), ("not", None)])
+def test_unary_op(op, expected):
+    # The frontend only folds negative constants, so build UnaryOp directly
+    module, _ = lower(A23)
+    module.body.append(Assign([Name("y")], UnaryOp(op, Name("a"))))
+    assert infer(module)["y"] == expected
+
+
+@pytest.mark.parametrize("expr, expected", [
+    ("a[0]", (3,)),
+    ("a[-1]", (3,)),
+    ("a[0, 1]", "scalar"),
+    ("a[1, :]", (3,)),
+    ("a[:, 0]", (2,)),
+    ("a[:, 1:]", (2, 2)),
+    ("a[i]", (3,)),  # Scalar-shaped name used as an integer index
+])
+def test_index(expr, expected):
+    assert shape_of(A23 + "\ni = 1", expr) == expected
+
+
+@pytest.mark.parametrize("expr", [
+    "a[2]",  # Out of bounds for dim 2
+    "a[-3]",
+    "a[1.5]",  # Float index
+    "a[0, 0, 0]",  # More indices than dims
+    "a[a]",  # Fancy indexing has no rule
+    "a[::0]",  # Zero step raises
+])
+def test_index_invalid_or_unsupported_is_none(expr):
+    assert shape_of(A23, expr) is None
+
+
+@pytest.mark.parametrize("expr, expected", [
+    ("v[1:4]", (3,)),
+    ("v[::2]", (3,)),
+    ("v[-2:]", (2,)),
+    ("v[::-1]", (5,)),
+    ("v[10:]", (0,)),
+    ("v[:n]", (None,)),  # Non-constant bound
+])
+def test_slice_lengths(expr, expected):
+    assert shape_of("v = np.zeros(5)", expr) == expected
+
+
+def test_slice_lengths_match_python_exactly():
+    bounds = [None, *range(-7, 8)]
+    steps = [None, -3, -2, -1, 1, 2, 3]
+    for start, stop, step in itertools.product(bounds, bounds, steps):
+        consts = [None if b is None else Const(b) for b in (start, stop, step)]
+        module = Module([
+            Assign([Name("v")], ArrayLiteral([Const(i) for i in range(5)])),
+            Assign([Name("w")], Index(Name("v"), [Slice(*consts)])),
+        ])
+        expected = len(np.arange(5)[start:stop:step])
+        assert infer(module)["w"] == (expected,), (start, stop, step)
+
+
+@pytest.mark.parametrize("setup, expected", [
+    (A23, (3, 2)),
+    ("a = np.zeros(4)", (4,)),
+    ("a = 7", "scalar"),
+    ("a = np.zeros((2, 3, 4))", (4, 3, 2)),
+])
+def test_transpose(setup, expected):
+    assert shape_of(setup, "a.T") == expected
+
+
+def test_shape_attribute_is_none_for_now():
+    assert shape_of(A23, "a.shape") is None
+
+
+@pytest.mark.parametrize("expr, expected", [
+    ("np.zeros((2, 3))", (2, 3)),
+    ("np.ones((4, 1, 2))", (4, 1, 2)),
+    ("np.zeros(4)", (4,)),
+    ("np.ones(0)", (0,)),
+    ("np.eye(3)", (3, 3)),
+    ("np.eye(3, k=1)", (3, 3)),
+])
+def test_constructor_calls(expr, expected):
+    assert shape_of("", expr) == expected
+
+
+@pytest.mark.parametrize("expr", [
+    "np.zeros((2, n))",  # Non-constant dim
+    "np.zeros(n)",
+    "np.zeros(-1)",  # NumPy raises on negative sizes
+    "np.ones(2.5)",
+    "np.zeros(())",  # 0-d array, not claimed as a scalar
+    "np.eye(3, 4)",  # Non-square form has no rule
+    "np.eye(3, M=4)",
+    "np.sum(np.ones(3))",  # Other calls: no rule yet
+])
+def test_constructor_calls_unknown(expr):
+    assert shape_of("", expr) is None
+
+
+def test_tuple_nodes_are_not_arrays():
+    module, _ = infer_source("z = np.zeros((2, 3))")
+    call = module.body[0].value
+    assert call.shape == (2, 3)
+    assert call.args[0].shape is None
+    assert [e.shape for e in call.args[0].elements] == ["scalar", "scalar"]
