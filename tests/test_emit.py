@@ -172,7 +172,6 @@ def test_power_of_unary_neg_is_parenthesized():
 # --- Placeholders ---
 
 @pytest.mark.parametrize("expr, kind", [
-    ("v[0]", "Index"),
     ("np.zeros(3)", "Call"),
     ("A.T", "Attribute"),
     ("v + A.T", "Attribute"),
@@ -186,6 +185,154 @@ def test_frontend_unsupported_and_surrounding_statements():
     assert emit_source(source) == (
         "x = 1;\n"
         "% UNSUPPORTED (line 2): unsupported statement: For\n"
-        "% UNSUPPORTED: Index in assignment to y\n"
+        "% UNSUPPORTED: Index into a scalar in assignment to y\n"
         "z = x + 1;\n"
     )
+
+
+# --- Indexing ---
+# Shared setup: v is (8,), A is (3, 4), i and j are scalars, u has an unknown shape
+
+INDEX_SETUP = (
+    "v = np.zeros(8)\n"
+    "A = np.zeros((3, 4))\n"
+    "i = 1\n"
+    "j = 2\n"
+)
+
+
+def emit_index(expr):
+    """MATLAB line for `y = <expr>` after the indexing setup."""
+    return emit_source(f"{INDEX_SETUP}y = {expr}").splitlines()[-1]
+
+
+@pytest.mark.parametrize("expr, line", [
+    # Constant non-negative indices are folded to 1-based
+    ("v[0]", "y = v(1);"),
+    ("v[3]", "y = v(4);"),
+    # Negative constants count from end
+    ("v[-1]", "y = v(end);"),
+    ("v[-2]", "y = v(end-1);"),
+    # Non-constant expressions get + 1
+    ("v[i]", "y = v(i + 1);"),
+    ("v[i + j]", "y = v(i + j + 1);"),
+    ("v[i - j]", "y = v(i - j + 1);"),
+    ("v[2 * i]", "y = v(2 * i + 1);"),
+])
+def test_integer_indices(expr, line):
+    assert emit_index(expr) == line
+
+
+@pytest.mark.parametrize("expr, line", [
+    ("v[2:5]", "y = v(3:5);"),
+    ("v[:5]", "y = v(1:5);"),
+    ("v[2:]", "y = v(3:end);"),
+    ("v[:-1]", "y = v(1:end-1);"),
+    ("v[-2:]", "y = v(end-1:end);"),
+    ("v[-3:-1]", "y = v(end-2:end-1);"),
+    ("v[::2]", "y = v(1:2:end);"),
+    ("v[1:7:2]", "y = v(2:2:7);"),
+    ("v[i:j]", "y = v(i + 1:j);"),
+    ("v[:i + j]", "y = v(1:i + j);"),
+])
+def test_positive_step_slices(expr, line):
+    assert emit_index(expr) == line
+
+
+@pytest.mark.parametrize("expr, line", [
+    ("v[::-1]", "y = v(end:-1:1);"),
+    ("v[5:1:-1]", "y = v(6:-1:3);"),
+    ("v[5::-1]", "y = v(6:-1:1);"),
+    ("v[::-2]", "y = v(end:-2:1);"),
+    ("v[6:0:-2]", "y = v(7:-2:2);"),
+    ("v[-1:-4:-1]", "y = v(end:-1:end-2);"),
+    ("v[:-3:-1]", "y = v(end:-1:end-1);"),
+])
+def test_negative_step_slices(expr, line):
+    assert emit_index(expr) == line
+
+
+@pytest.mark.parametrize("expr, reason", [
+    ("v[i::-1]", "negative-step slice with non-constant bounds"),
+    ("v[:j:-1]", "negative-step slice with non-constant bounds"),
+    ("v[::i]", "slice with a zero or non-constant step"),
+    ("v[::0]", "slice with a zero or non-constant step"),
+])
+def test_unsupported_slices(expr, reason):
+    assert emit_index(expr) == f"% UNSUPPORTED: {reason} in assignment to y"
+
+
+@pytest.mark.parametrize("expr, line", [
+    ("A[1, 2]", "y = A(2, 3);"),
+    ("A[i, j]", "y = A(i + 1, j + 1);"),
+    ("A[1, :]", "y = A(2, :);"),
+    # A[:, j] is 1-D in NumPy, so the MATLAB column is transposed to a row
+    ("A[:, 0]", "y = A(:, 1).';"),
+    ("A[0:2, -1]", "y = A(1:2, end).';"),
+    ("A[-1, 1:3]", "y = A(end, 2:3);"),
+    # A single index on a 2-D array selects rows, never a linear index
+    ("A[1]", "y = A(2, :);"),
+    ("A[1:3]", "y = A(2:3, :);"),
+    ("A[-1]", "y = A(end, :);"),
+    ("A[::-1]", "y = A(end:-1:1, :);"),
+])
+def test_2d_indexing(expr, line):
+    assert emit_index(expr) == line
+
+
+@pytest.mark.parametrize("expr", ["v[:]", "A[:, :]", "u[:]"])
+def test_full_slice_is_the_whole_array(expr):
+    # MATLAB's v(:) would turn a row vector into a column
+    assert emit_index(expr) == f"y = {expr[0]};"
+
+
+@pytest.mark.parametrize("expr, line", [
+    # Python clamps out-of-range bounds where MATLAB would raise, so resolve them exactly
+    ("v[:9]", "y = v(1:8);"),
+    ("v[-10:]", "y = v(1:8);"),
+    ("v[2:100:2]", "y = v(3:2:7);"),
+    ("v[:-10]", "y = v(1:0);"),  # Empty, and still 1x0 like NumPy's (0,)
+    ("v[9::-1]", "y = v(8:-1:1);"),
+    ("v[5:-10:-1]", "y = v(6:-1:1);"),
+    ("A[1:9]", "y = A(2:3, :);"),
+    # Unknown sizes can't be clamped
+    ("u[:9]", "y = u(1:9);  % TODO: verify indexing dimensionality"),
+])
+def test_out_of_range_slice_bounds_are_clamped(expr, line):
+    assert emit_index(expr) == line
+
+
+def test_3d_indexing_is_unsupported():
+    # MATLAB keeps singleton dims, so t(2, :, :) would stay 1x3x4
+    assert emit_source("t = np.zeros((2, 3, 4))\ny = t[1]").splitlines()[-1] == (
+        "% UNSUPPORTED: Index into an array with more than 2 dimensions in assignment to y"
+    )
+
+
+def test_unknown_shape_single_index_gets_todo():
+    assert emit_index("u[0]") == "y = u(1);  % TODO: verify indexing dimensionality"
+    assert emit_index("u[1:3]") == "y = u(2:3);  % TODO: verify indexing dimensionality"
+
+
+def test_unknown_shape_two_indices_has_no_todo():
+    assert emit_index("u[0, 1]") == "y = u(1, 2);"
+    assert emit_index("u[1, :]") == "y = u(2, :);"
+
+
+def test_unknown_shape_column_selection_is_transposed_with_todo():
+    assert emit_index("u[:, 0]") == "y = u(:, 1).';  % TODO: verify indexing dimensionality"
+
+
+def test_index_inside_expression():
+    assert emit_index("v[0] + A[1, 2] * 2") == "y = v(1) + A(2, 3) * 2;"
+
+
+@pytest.mark.parametrize("expr, reason", [
+    ("A[0, 0, 0]", "Index with more indices than dimensions"),
+    ("i[0]", "Index into a scalar"),
+    ("v[v]", "array (fancy) index"),
+    ("v[1.5]", "non-integer index"),
+    ("(v + v)[0]", "Index into an expression"),
+])
+def test_unsupported_indexing(expr, reason):
+    assert emit_index(expr) == f"% UNSUPPORTED: {reason} in assignment to y"

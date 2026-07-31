@@ -9,7 +9,7 @@ prove they're equivalent. 1-D NumPy arrays become MATLAB row vectors.
 
 from __future__ import annotations
 
-from compiler.ir import ArrayLiteral, Assign, BinOp, Const, Expr, Module, Name, UnaryOp, Unsupported
+from compiler.ir import ArrayLiteral, Assign, BinOp, Const, Expr, Index, Module, Name, Slice, UnaryOp, Unsupported
 
 # MATLAB precedence, loosest to tightest. MATLAB's ^ is left-associative
 # (Python's ** is right), so every binary op is emitted as left-associative.
@@ -22,6 +22,7 @@ _PREC_ATOM = 5
 _UNARY_OPS = {"neg": "-", "pos": "+", "not": "~"}
 
 _MATMUL_TODO = "TODO: verify matmul orientation"
+_INDEX_TODO = "TODO: verify indexing dimensionality"
 
 
 class _UnsupportedError(Exception):
@@ -83,7 +84,14 @@ class _ExprEmitter:
                 return self._matmul(node)
             return self._elementwise(node)
 
+        if isinstance(node, Index):
+            return self._index(node), _PREC_ATOM
+
         raise _UnsupportedError(type(node).__name__)
+
+    def _todo(self, message: str):
+        if message not in self.todos:
+            self.todos.append(message)
 
     def _wrap(self, node: Expr, min_prec: int) -> str:
         text, prec = self.emit(node)
@@ -121,8 +129,101 @@ class _ExprEmitter:
             right = self._wrap(node.right, _PREC_ATOM)
             return f"{left} * {right}.'", _PREC_MUL
         if ndims not in ((2, 2), (1, 2)):
-            self.todos.append(_MATMUL_TODO)
+            self._todo(_MATMUL_TODO)
         return self._binary(node.left, "*", node.right, _PREC_MUL)
+
+    # --- Indexing: Python is 0-based with exclusive stops, MATLAB 1-based with inclusive ends ---
+
+    def _index(self, node: Index) -> str:
+        if not isinstance(node.value, Name):
+            raise _UnsupportedError("Index into an expression")  # MATLAB can't index (a + b)(1)
+
+        indices = node.indices
+        base = node.value.shape
+        if isinstance(base, tuple):
+            if len(indices) > len(base):
+                raise _UnsupportedError("Index with more indices than dimensions")
+            if len(base) > 2:
+                # MATLAB keeps singleton dims (t(2, :, :) stays 1x3x4), so N-D needs more than a rewrite
+                raise _UnsupportedError("Index into an array with more than 2 dimensions")
+            dims = list(base)
+        elif base is None:
+            dims = [None] * len(indices)
+        else:
+            raise _UnsupportedError("Index into a scalar")
+
+        # a[:] (or A[:, :]) is the whole array; MATLAB's v(:) would turn a row vector into a column
+        if all(isinstance(i, Slice) and i.start is None and i.stop is None and i.step is None for i in indices):
+            return node.value.id
+
+        parts = [
+            self._slice(i, dim) if isinstance(i, Slice) else self._position(i)
+            for i, dim in zip(indices, dims)
+        ]
+
+        if base is None and len(parts) == 1:
+            self._todo(_INDEX_TODO)
+        # A single index on a 2-D array selects a row (A[1] -> A(2, :)), never a linear index.
+        # 1-D arrays are row vectors, where a(i) already means element i.
+        if isinstance(base, tuple) and len(base) == 2 and len(parts) == 1:
+            parts.append(":")
+
+        text = f"{node.value.id}({', '.join(parts)})"
+        # A[:, j] is 1-D in NumPy (a row vector here), but A(:, j) is a MATLAB column
+        if len(indices) == 2 and isinstance(indices[0], Slice) and not isinstance(indices[1], Slice):
+            if base is None:
+                self._todo(_INDEX_TODO)
+            text += ".'"
+        return text
+
+    def _position(self, node: Expr) -> str:
+        """A 0-based Python position (negatives count from the end) as a 1-based MATLAB one."""
+        if isinstance(node, Const):
+            if not _is_int(node.value):
+                raise _UnsupportedError("non-integer index")
+            return str(node.value + 1) if node.value >= 0 else _end_offset(node.value + 1)
+        if isinstance(node.shape, tuple):
+            raise _UnsupportedError("array (fancy) index")
+        return f"{self._wrap(node, _PREC_ADD)} + 1"
+
+    def _slice(self, node: Slice, dim: int | None) -> str:
+        start, stop, step = node.start, node.stop, node.step
+        if step is not None and not (isinstance(step, Const) and _is_int(step.value) and step.value != 0):
+            raise _UnsupportedError("slice with a zero or non-constant step")
+
+        clamped = _clamped_slice(node, dim)
+        if clamped is not None:
+            return clamped
+
+        if step is None or step.value > 0:
+            if start is None and stop is None and step is None:
+                return ":"
+            first = "1" if start is None else self._position(start)
+            # Python's exclusive stop t is MATLAB's inclusive end t, so no +1
+            if stop is None:
+                last = "end"
+            elif isinstance(stop, Const):
+                if not _is_int(stop.value):
+                    raise _UnsupportedError("non-integer slice bound")
+                last = str(stop.value) if stop.value >= 0 else _end_offset(stop.value)
+            else:
+                last = self._wrap(stop, _PREC_ADD)
+            middle = [] if step is None else [str(step.value)]
+            return ":".join([first, *middle, last])
+
+        # Negative step: counting down, the exclusive stop t means the last element is t+1
+        # (0-based), i.e. t+2 in MATLAB. Only constant bounds are converted.
+        for bound in (start, stop):
+            if bound is not None and not (isinstance(bound, Const) and _is_int(bound.value)):
+                raise _UnsupportedError("negative-step slice with non-constant bounds")
+        first = "end" if start is None else self._position(start)
+        if stop is None:
+            last = "1"
+        elif stop.value >= 0:
+            last = str(stop.value + 2)
+        else:
+            last = _end_offset(stop.value + 2)  # Stop -m is len-m, so end-m+2
+        return f"{first}:{step.value}:{last}"
 
     def _array(self, node: ArrayLiteral) -> str:
         elements = node.elements
@@ -136,6 +237,40 @@ class _ExprEmitter:
             return "[" + "; ".join(", ".join(self.emit(e)[0] for e in row) for row in elements) + "]"
 
         raise _UnsupportedError("ArrayLiteral that is ragged or has more than 2 dimensions")
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _clamped_slice(node: Slice, dim: int | None) -> str | None:
+    """
+    Python clamps out-of-range slice bounds (v[:9] on 8 elements is all of v) where
+    MATLAB raises. For an all-constant slice with such a bound on a known-size dim,
+    returns the exact MATLAB range; otherwise None (the bounds map directly).
+    """
+    if dim is None:
+        return None
+    parts = (node.start, node.stop, node.step)
+    if not all(p is None or (isinstance(p, Const) and _is_int(p.value)) for p in parts):
+        return None
+    start, stop, step = (None if p is None else p.value for p in parts)
+
+    # Ranges where the direct start/stop mapping is exact (a negative step starts at most at dim-1)
+    max_start = dim if step is None or step > 0 else dim - 1
+    if (start is None or -dim <= start <= max_start) and (stop is None or -dim <= stop <= dim):
+        return None
+
+    positions = range(*slice(start, stop, step).indices(dim))
+    if not positions:
+        return "1:0"  # Empty range; v([]) would be 0x0 rather than 1x0
+    first, last = positions[0] + 1, positions[-1] + 1
+    return f"{first}:{last}" if positions.step == 1 else f"{first}:{positions.step}:{last}"
+
+
+def _end_offset(offset: int) -> str:
+    """MATLAB's `end` shifted by offset: end, end-1, end+1."""
+    return "end" if offset == 0 else f"end{offset:+d}"
 
 
 def _format_const(value) -> str:
