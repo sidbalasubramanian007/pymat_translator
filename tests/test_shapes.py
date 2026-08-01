@@ -107,7 +107,7 @@ def test_nodes_over_unknown_names_are_unknown(source):
 def test_nested_literal_inside_other_node_is_annotated():
     module, _ = infer_source("s = np.sum(np.array([[1, 2], [3, 4]]), axis=0)")
     call = module.body[0].value
-    assert call.shape is None
+    assert call.shape == (2,)
     assert call.args[0].shape == (2, 2)
     assert call.kwargs["axis"].shape == "scalar"
 
@@ -247,7 +247,7 @@ def test_slice_lengths_match_python_exactly():
     (A23, (3, 2)),
     ("a = np.zeros(4)", (4,)),
     ("a = 7", "scalar"),
-    ("a = np.zeros((2, 3, 4))", (4, 3, 2)),
+    ("a = np.array([[[1, 2]], [[3, 4]]])", None),  # np.transpose has no 3-D case
 ])
 def test_transpose(setup, expected):
     assert shape_of(setup, "a.T") == expected
@@ -259,11 +259,9 @@ def test_shape_attribute_is_none_for_now():
 
 @pytest.mark.parametrize("expr, expected", [
     ("np.zeros((2, 3))", (2, 3)),
-    ("np.ones((4, 1, 2))", (4, 1, 2)),
     ("np.zeros(4)", (4,)),
     ("np.ones(0)", (0,)),
     ("np.eye(3)", (3, 3)),
-    ("np.eye(3, k=1)", (3, 3)),
 ])
 def test_constructor_calls(expr, expected):
     assert shape_of("", expr) == expected
@@ -275,9 +273,8 @@ def test_constructor_calls(expr, expected):
     "np.zeros(-1)",  # NumPy raises on negative sizes
     "np.ones(2.5)",
     "np.zeros(())",  # 0-d array, not claimed as a scalar
-    "np.eye(3, 4)",  # Non-square form has no rule
-    "np.eye(3, M=4)",
-    "np.sum(np.ones(3))",  # Other calls: no rule yet
+    "np.ones((4, 1, 2))",  # Only 1-D and 2-D shapes have rules
+    "np.sum(np.zeros((2, 2, 2)))",  # No 3-D case
 ])
 def test_constructor_calls_unknown(expr):
     assert shape_of("", expr) is None

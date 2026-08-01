@@ -10,9 +10,8 @@ from __future__ import annotations
 
 from dataclasses import fields
 
-from compiler.ir import (
-    ArrayLiteral, Assign, Attribute, BinOp, Call, Const, Expr, Index, Module, Name, Shape, Slice, Tuple, UnaryOp,
-)
+from compiler import rules
+from compiler.ir import ArrayLiteral, Assign, BinOp, Call, Const, Expr, Index, Module, Name, Shape, Slice, UnaryOp
 
 _ELEMENTWISE_OPS = {"add", "sub", "mul", "div", "pow"}
 
@@ -62,16 +61,10 @@ def _derived_shape(node: Expr) -> Shape | None:
     if isinstance(node, Index):
         return _index_shape(node)
 
-    if isinstance(node, Attribute):
-        if node.attr == "T":
-            base = node.value.shape
-            return tuple(reversed(base)) if isinstance(base, tuple) else base
-        return None  # .shape and others: no rule yet
-
     if isinstance(node, Call):
         return _call_shape(node)
 
-    # Tuple, Slice: not arrays
+    # Tuple, Slice: not arrays. Attribute (.shape etc.): no rule yet (.T arrives as np.transpose)
     return None
 
 
@@ -155,33 +148,20 @@ def _slice_length(s: Slice, dim: int | None) -> int | None:
 
 
 def _call_shape(node: Call) -> Shape | None:
-    if node.func in ("np.zeros", "np.ones") and node.args:
-        shape_arg = node.args[0]
-        if isinstance(shape_arg, Tuple):
-            dims = [_size_const(e) for e in shape_arg.elements]
-            if not dims or None in dims:
-                return None
-            return tuple(dims)
-        n = _size_const(shape_arg)
-        return (n,) if n is not None else None
-
-    # np.eye(n, M) is (n, M); only the square form has a rule
-    if node.func == "np.eye" and len(node.args) == 1 and "M" not in node.kwargs:
-        n = _size_const(node.args[0])
-        return (n, n) if n is not None else None
-
-    return None
+    """Result shape from the call's rule in rules.yaml; None with no rule or no matching case."""
+    rule = rules.get(node.func)
+    if rule is None or rule.via:
+        return None
+    try:
+        bound = rules.bind(rule, node.args, node.kwargs)
+    except rules.RuleError:
+        return None
+    case = rules.match(rule, bound)
+    return rules.case_shape(case, bound) if case is not None else None
 
 
 def _is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
-
-
-def _size_const(node: Expr) -> int | None:
-    """The value of a non-negative int Const, else None."""
-    if isinstance(node, Const) and _is_int(node.value) and node.value >= 0:
-        return node.value
-    return None
 
 
 def _literal_shape(elements: list, symbols: dict[str, Shape | None]) -> Shape | None:

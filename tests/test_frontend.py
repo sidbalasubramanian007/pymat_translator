@@ -125,16 +125,11 @@ def test_call_with_kwargs():
 
 
 def test_call_with_deeper_dotted_name():
-    assert lower_value("y = np.linalg.inv(x)") == Call("np.linalg.inv", [Name("x")], {})
+    assert lower_value("y = scipy.linalg.inv(x)") == Call("scipy.linalg.inv", [Name("x")], {})
 
 
-def test_np_array_with_non_list_arg_is_a_generic_call():
-    assert lower_value("y = np.array(x)") == Call("np.array", [Name("x")], {})
-
-
-@pytest.mark.parametrize("attr", ["T", "shape"])
-def test_attribute(attr):
-    assert lower_value(f"y = x.{attr}") == Attribute(Name("x"), attr)
+def test_attribute():
+    assert lower_value("y = x.shape") == Attribute(Name("x"), "shape")
 
 
 def test_index_into_attribute():

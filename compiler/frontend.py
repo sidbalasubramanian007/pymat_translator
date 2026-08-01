@@ -3,12 +3,17 @@ Python frontend: lowers Python/NumPy source into compiler.ir nodes.
 
 Statements that can't be lowered become `Unsupported` records (kept in order in
 `Module.body` and also returned as a list) so the rest of the program still lowers.
+
+np.* calls must have a rule in rules.yaml and fit its params. Aliases declared
+there are rewritten here, so later passes only see the canonical form:
+x.reshape(2, 3) -> np.reshape(x, (2, 3)), x.T -> np.transpose(x), np.dot(a, b) -> a @ b.
 """
 
 from __future__ import annotations
 
 import ast
 
+from compiler import rules
 from compiler.ir import (
     ArrayLiteral, Assign, Attribute, BinOp, Call, Const, Expr, Index, Module, Name, Slice, Tuple, Unsupported,
 )
@@ -95,11 +100,20 @@ def _lower_expr(node: ast.expr) -> Expr:
             return ArrayLiteral(_lower_list(node.args[0]))
         if any(kw.arg is None for kw in node.keywords):
             raise _UnsupportedError("**kwargs in calls is not supported")
-        return Call(
-            func,
-            [_lower_call_arg(a) for a in node.args],
-            {kw.arg: _lower_call_arg(kw.value) for kw in node.keywords},
-        )
+        args = [_lower_call_arg(a) for a in node.args]
+        kwargs = {kw.arg: _lower_call_arg(kw.value) for kw in node.keywords}
+
+        # Method aliases from rules.yaml: x.reshape(2, 3) -> np.reshape(x, (2, 3))
+        receiver, _, method = func.rpartition(".")
+        method_rule = rules.by_method(method) if receiver and "." not in receiver and receiver != "np" else None
+        if method_rule is not None:
+            if method_rule.method_pack and len(args) > 1:
+                args = [Tuple(args)]
+            func, args = method_rule.name, [Name(receiver), *args]
+
+        if func.startswith("np."):
+            return _lower_np_call(func, args, kwargs)
+        return Call(func, args, kwargs)
 
     if isinstance(node, ast.Subscript):
         # Python 3.9+: the subscript is the node itself; a[i, j] arrives as a Tuple
@@ -107,9 +121,31 @@ def _lower_expr(node: ast.expr) -> Expr:
         return Index(_lower_expr(node.value), [_lower_index(p) for p in parts])
 
     if isinstance(node, ast.Attribute):
+        # Attribute aliases from rules.yaml: x.T -> np.transpose(x)
+        attribute_rule = rules.by_attribute(node.attr)
+        if attribute_rule is not None:
+            return Call(attribute_rule.name, [_lower_expr(node.value)])
         return Attribute(_lower_expr(node.value), node.attr)
 
     raise _UnsupportedError(f"unsupported expression: {type(node).__name__}")
+
+
+def _lower_np_call(func: str, args: list[Expr], kwargs: dict[str, Expr]) -> Expr:
+    """np.* calls must have a rule in rules.yaml and fit its params; anything else is unsupported."""
+    rule = rules.get(func)
+    if rule is None:
+        raise _UnsupportedError(f"no translation rule for {func}")
+    try:
+        bound = rules.bind(rule, args, kwargs)
+    except rules.RuleError as e:
+        raise _UnsupportedError(str(e)) from None
+    if rule.via:
+        # e.g. np.dot(a, b) means exactly a @ b
+        left, right = (bound.get(p) for p in rule.params)
+        if left is None or right is None:
+            raise _UnsupportedError(f"{func} needs both arguments")
+        return BinOp(rule.via, left, right)
+    return Call(func, args, kwargs)
 
 
 def _dotted_name(node: ast.expr) -> str:

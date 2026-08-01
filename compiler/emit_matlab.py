@@ -9,10 +9,12 @@ prove they're equivalent. 1-D NumPy arrays become MATLAB row vectors.
 
 from __future__ import annotations
 
-from compiler.ir import ArrayLiteral, Assign, BinOp, Const, Expr, Index, Module, Name, Slice, UnaryOp, Unsupported
+from compiler import rules
+from compiler.ir import ArrayLiteral, Assign, BinOp, Call, Const, Expr, Index, Module, Name, Slice, UnaryOp, Unsupported
 
 # MATLAB precedence, loosest to tightest. MATLAB's ^ is left-associative
 # (Python's ** is right), so every binary op is emitted as left-associative.
+_PREC_COLON = 0  # a:b ranges, e.g. from np.arange; 0:4 + 1 would mean 0:5
 _PREC_ADD = 1
 _PREC_MUL = 2
 _PREC_UNARY = 3
@@ -87,6 +89,9 @@ class _ExprEmitter:
         if isinstance(node, Index):
             return self._index(node), _PREC_ATOM
 
+        if isinstance(node, Call):
+            return self._call(node)
+
         raise _UnsupportedError(type(node).__name__)
 
     def _todo(self, message: str):
@@ -131,6 +136,27 @@ class _ExprEmitter:
         if ndims not in ((2, 2), (1, 2)):
             self._todo(_MATMUL_TODO)
         return self._binary(node.left, "*", node.right, _PREC_MUL)
+
+    def _call(self, node: Call) -> tuple[str, int]:
+        """np.* calls are translated from rules.yaml; no rule or no matching case is unsupported."""
+        rule = rules.get(node.func)
+        if rule is None:
+            raise _UnsupportedError(f"no translation rule for {node.func}")
+        try:
+            bound = rules.bind(rule, node.args, node.kwargs)
+        except rules.RuleError as e:
+            raise _UnsupportedError(str(e)) from None
+        case = rules.match(rule, bound)
+        if case is None:
+            raise _UnsupportedError(f"{node.func} with these argument values or shapes")
+
+        # A no-op template ("{x}") keeps the argument's own precedence
+        identity = rules.identity_param(case)
+        if identity is not None:
+            return self.emit(bound[identity])
+
+        text = rules.render(case, bound, lambda arg, parens: self._wrap(arg, _PREC_ATOM) if parens else self.emit(arg)[0])
+        return text, _PREC_COLON if _has_top_level_colon(text) else _PREC_ATOM
 
     # --- Indexing: Python is 0-based with exclusive stops, MATLAB 1-based with inclusive ends ---
 
@@ -237,6 +263,18 @@ class _ExprEmitter:
             return "[" + "; ".join(", ".join(self.emit(e)[0] for e in row) for row in elements) + "]"
 
         raise _UnsupportedError("ArrayLiteral that is ragged or has more than 2 dimensions")
+
+
+def _has_top_level_colon(text: str) -> bool:
+    depth = 0
+    for ch in text:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif ch == ":" and depth == 0:
+            return True
+    return False
 
 
 def _is_int(value) -> bool:

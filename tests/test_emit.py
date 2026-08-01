@@ -172,9 +172,9 @@ def test_power_of_unary_neg_is_parenthesized():
 # --- Placeholders ---
 
 @pytest.mark.parametrize("expr, kind", [
-    ("np.zeros(3)", "Call"),
-    ("A.T", "Attribute"),
-    ("v + A.T", "Attribute"),
+    ("f(v)", "no translation rule for f"),
+    ("A.shape", "Attribute"),
+    ("v + A.shape", "Attribute"),
 ])
 def test_unhandled_nodes_become_placeholders(expr, kind):
     assert emit_line(expr) == f"% UNSUPPORTED: {kind} in assignment to y"
@@ -304,7 +304,7 @@ def test_out_of_range_slice_bounds_are_clamped(expr, line):
 
 def test_3d_indexing_is_unsupported():
     # MATLAB keeps singleton dims, so t(2, :, :) would stay 1x3x4
-    assert emit_source("t = np.zeros((2, 3, 4))\ny = t[1]").splitlines()[-1] == (
+    assert emit_source("t = np.array([[[1, 2]], [[3, 4]]])\ny = t[1]").splitlines()[-1] == (
         "% UNSUPPORTED: Index into an array with more than 2 dimensions in assignment to y"
     )
 

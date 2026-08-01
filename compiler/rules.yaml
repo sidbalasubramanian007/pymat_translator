@@ -1,0 +1,294 @@
+# Translation rules for NumPy calls. Used by:
+#   compiler/frontend.py     which calls exist, which args they accept, and aliases
+#   compiler/shapes.py       the result shape
+#   compiler/emit_matlab.py  the MATLAB code
+# An np.* call with no rule here, or whose arguments match no case, is reported
+# as unsupported. Nothing is guessed.
+#
+# Format, one entry per NumPy function keyed by its dotted name:
+#
+#   np.name:
+#     params: [x, axis]   Positional parameters, in order. Calls may pass fewer.
+#     kwargs: [axis]      Params that may also be passed by keyword (default: none).
+#     method: reshape     Optional: x.reshape(...) means np.name(x, ...).
+#     method_pack: shape  Optional, with `method`: several positional args are packed
+#                         into a tuple for this param (x.reshape(2, 3) == np.reshape(x, (2, 3))).
+#     attribute: T        Optional: x.T means np.name(x).
+#     via: matmul         Optional: the call means exactly `a <op> b` for this IR operator,
+#                         translated by the operator's own logic (no cases needed).
+#     cases:              Tried in order; the first whose `when` matches is used.
+#       - when: {param: condition, other: [condition, condition]}
+#         matlab: "template"
+#         shape: shape spec
+#
+# Conditions (params not named in `when` are unconstrained):
+#   absent / present   param not passed / passed
+#   int                integer constant (may be negative)
+#   size               non-negative integer constant
+#   positive           integer constant > 0
+#   sizes:N            tuple of N non-negative integer constants, e.g. (2, 3)
+#   0, 1, ...          exactly that integer constant (e.g. axis: 0)
+#   name               a plain variable (MATLAB can only index variables, as in x(:))
+#   nonconst           not a constant (e.g. a size that's only known at runtime)
+#   scalar / 1d / 2d   inferred shape of the argument
+#
+# Template placeholders:
+#   {p}      the argument's MATLAB code
+#   {(p)}    the same, parenthesized unless it's a single term; use it before postfix
+#            operators like .'
+#   {p.k}    element k of a tuple argument
+#   {p-1}    an integer constant argument plus or minus a number, folded (e.g. {b-1})
+#
+# Shape specs (1-D results are MATLAB row vectors, matching the emitter):
+#   scalar               a scalar
+#   {same: p}            the shape of argument p
+#   [d, ...]             dims, each an int, null (unknown size), "p" (an integer constant
+#                        argument), or "p.k" (element k of tuple argument p, or dim k of
+#                        array argument p's shape)
+#   {range: [a, b, s]}   1-D with len(range(a, b, s)) elements; items are ints or param names
+#   null                 unknown
+
+# --- Constructors ---
+
+np.zeros:
+  params: [shape]
+  cases:
+    - when: {shape: size}
+      matlab: "zeros(1, {shape})"
+      shape: [shape]
+    - when: {shape: "sizes:1"}
+      matlab: "zeros(1, {shape.0})"
+      shape: [shape.0]
+    - when: {shape: "sizes:2"}
+      matlab: "zeros({shape.0}, {shape.1})"
+      shape: [shape.0, shape.1]
+    - when: {shape: [scalar, nonconst]}
+      matlab: "zeros(1, {shape})"
+      shape: [null]
+
+np.ones:
+  params: [shape]
+  cases:
+    - when: {shape: size}
+      matlab: "ones(1, {shape})"
+      shape: [shape]
+    - when: {shape: "sizes:1"}
+      matlab: "ones(1, {shape.0})"
+      shape: [shape.0]
+    - when: {shape: "sizes:2"}
+      matlab: "ones({shape.0}, {shape.1})"
+      shape: [shape.0, shape.1]
+    - when: {shape: [scalar, nonconst]}
+      matlab: "ones(1, {shape})"
+      shape: [null]
+
+np.eye:
+  params: [N]
+  cases:
+    - when: {N: size}
+      matlab: "eye({N})"
+      shape: [N, N]
+    - when: {N: [scalar, nonconst]}
+      matlab: "eye({N})"
+      shape: [null, null]
+
+# MATLAB's colon includes its end and is unreliable with float endpoints, so only
+# integer constants are accepted; the exclusive stop b becomes b-1.
+np.arange:
+  params: [a, b, s]
+  cases:
+    - when: {a: int, b: absent, s: absent}
+      matlab: "0:{a-1}"
+      shape: {range: [0, a, 1]}
+    - when: {a: int, b: int, s: absent}
+      matlab: "{a}:{b-1}"
+      shape: {range: [a, b, 1]}
+    - when: {a: int, b: int, s: positive}
+      matlab: "{a}:{s}:{b-1}"
+      shape: {range: [a, b, s]}
+
+np.linspace:
+  params: [start, stop, num]
+  kwargs: [num]
+  cases:
+    - when: {start: scalar, stop: scalar, num: size}
+      matlab: "linspace({start}, {stop}, {num})"
+      shape: [num]
+    # NumPy defaults to 50 points; MATLAB defaults to 100, so always pass it
+    - when: {start: scalar, stop: scalar, num: absent}
+      matlab: "linspace({start}, {stop}, 50)"
+      shape: [50]
+    - when: {start: scalar, stop: scalar, num: [scalar, nonconst]}
+      matlab: "linspace({start}, {stop}, {num})"
+      shape: [null]
+
+# --- Reductions ---
+# No axis reduces over every element: x(:) on a variable, a reshaped column otherwise.
+# axis=1 gives a MATLAB column, so it is transposed back to a row vector.
+
+np.sum:
+  params: [x, axis]
+  kwargs: [axis]
+  cases:
+    - when: {x: 1d, axis: absent}
+      matlab: "sum({x})"
+      shape: scalar
+    - when: {x: 1d, axis: 0}
+      matlab: "sum({x})"
+      shape: scalar
+    - when: {x: [2d, name], axis: absent}
+      matlab: "sum({x}(:))"
+      shape: scalar
+    - when: {x: 2d, axis: absent}
+      matlab: "sum(reshape({x}, [], 1))"
+      shape: scalar
+    - when: {x: 2d, axis: 0}
+      matlab: "sum({x}, 1)"
+      shape: [x.1]
+    - when: {x: 2d, axis: 1}
+      matlab: "sum({x}, 2).'"
+      shape: [x.0]
+
+np.mean:
+  params: [x, axis]
+  kwargs: [axis]
+  cases:
+    - when: {x: 1d, axis: absent}
+      matlab: "mean({x})"
+      shape: scalar
+    - when: {x: 1d, axis: 0}
+      matlab: "mean({x})"
+      shape: scalar
+    - when: {x: [2d, name], axis: absent}
+      matlab: "mean({x}(:))"
+      shape: scalar
+    - when: {x: 2d, axis: absent}
+      matlab: "mean(reshape({x}, [], 1))"
+      shape: scalar
+    - when: {x: 2d, axis: 0}
+      matlab: "mean({x}, 1)"
+      shape: [x.1]
+    - when: {x: 2d, axis: 1}
+      matlab: "mean({x}, 2).'"
+      shape: [x.0]
+
+# max/min with a dim need an empty second argument: max(x, [], dim). max(x, dim)
+# would mean the elementwise max of x and the number dim.
+np.max:
+  params: [x, axis]
+  kwargs: [axis]
+  cases:
+    - when: {x: 1d, axis: absent}
+      matlab: "max({x})"
+      shape: scalar
+    - when: {x: 1d, axis: 0}
+      matlab: "max({x})"
+      shape: scalar
+    - when: {x: [2d, name], axis: absent}
+      matlab: "max({x}(:))"
+      shape: scalar
+    - when: {x: 2d, axis: absent}
+      matlab: "max(reshape({x}, [], 1))"
+      shape: scalar
+    - when: {x: 2d, axis: 0}
+      matlab: "max({x}, [], 1)"
+      shape: [x.1]
+    - when: {x: 2d, axis: 1}
+      matlab: "max({x}, [], 2).'"
+      shape: [x.0]
+
+np.min:
+  params: [x, axis]
+  kwargs: [axis]
+  cases:
+    - when: {x: 1d, axis: absent}
+      matlab: "min({x})"
+      shape: scalar
+    - when: {x: 1d, axis: 0}
+      matlab: "min({x})"
+      shape: scalar
+    - when: {x: [2d, name], axis: absent}
+      matlab: "min({x}(:))"
+      shape: scalar
+    - when: {x: 2d, axis: absent}
+      matlab: "min(reshape({x}, [], 1))"
+      shape: scalar
+    - when: {x: 2d, axis: 0}
+      matlab: "min({x}, [], 1)"
+      shape: [x.1]
+    - when: {x: 2d, axis: 1}
+      matlab: "min({x}, [], 2).'"
+      shape: [x.0]
+
+# --- Elementwise functions ---
+
+np.abs:
+  params: [x]
+  cases:
+    - matlab: "abs({x})"
+      shape: {same: x}
+
+np.sqrt:
+  params: [x]
+  cases:
+    - matlab: "sqrt({x})"
+      shape: {same: x}
+
+np.exp:
+  params: [x]
+  cases:
+    - matlab: "exp({x})"
+      shape: {same: x}
+
+np.log:
+  params: [x]
+  cases:
+    - matlab: "log({x})"
+      shape: {same: x}
+
+np.sin:
+  params: [x]
+  cases:
+    - matlab: "sin({x})"
+      shape: {same: x}
+
+np.cos:
+  params: [x]
+  cases:
+    - matlab: "cos({x})"
+      shape: {same: x}
+
+# --- Linear algebra and layout ---
+
+np.dot:
+  params: [a, b]
+  via: matmul
+
+# .' is the plain transpose; ' would also conjugate complex values.
+np.transpose:
+  params: [x]
+  attribute: T
+  cases:
+    - when: {x: 2d}
+      matlab: "{(x)}.'"
+      shape: [x.1, x.0]
+    # Transposing 1-D is a no-op in NumPy; x.' would turn the row vector into a column
+    - when: {x: 1d}
+      matlab: "{x}"
+      shape: {same: x}
+    - when: {x: scalar}
+      matlab: "{x}"
+      shape: scalar
+
+# NumPy fills the new shape in row-major (C) order, MATLAB in column-major order.
+# Transposing first lists x's elements in row-major order; reshaping that into
+# (n, m) column-major and transposing back to (m, n) lays them out row by row,
+# as NumPy does.
+np.reshape:
+  params: [x, shape]
+  method: reshape
+  method_pack: shape
+  cases:
+    - when: {shape: "sizes:2"}
+      matlab: "reshape({(x)}.', {shape.1}, {shape.0}).'"
+      shape: [shape.0, shape.1]
