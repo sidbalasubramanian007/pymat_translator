@@ -28,31 +28,56 @@ _INDEX_TODO = "TODO: verify indexing dimensionality"
 
 
 class _UnsupportedError(Exception):
-    """Raised for IR the emitter can't handle yet; the statement becomes a placeholder."""
+    """Raised for IR the emitter can't handle; the statement becomes an unsupported marker."""
 
 
 def emit(module: Module) -> str:
-    lines = []
+    return emit_with_unsupported(module)[0]
+
+
+def emit_with_unsupported(module: Module) -> tuple[str, list[Unsupported]]:
+    """
+    Emits MATLAB code plus every statement that couldn't be translated, whether the
+    frontend already gave up on it or the emitter can't handle it. Each one gets a
+    stable id (U1, U2, ... in source order) and exactly one marker line at its position:
+        % UNSUPPORTED[U1]: <original Python source>
+    """
+    lines: list[str] = []
+    unsupported: list[Unsupported] = []
     for stmt in module.body:
-        if isinstance(stmt, Unsupported):
-            lines.append(f"% UNSUPPORTED (line {stmt.lineno}): {stmt.reason}")
-        elif isinstance(stmt, Assign):
-            lines.append(_emit_assign(stmt))
+        if isinstance(stmt, Assign):
+            try:
+                lines.append(_emit_assign(stmt))
+                continue
+            except _UnsupportedError as e:
+                entry = Unsupported(stmt.lineno, stmt.source or "", str(e))
+        elif isinstance(stmt, Unsupported):
+            entry = stmt
         else:
-            lines.append(f"% UNSUPPORTED: {type(stmt).__name__}")
-    return "".join(line + "\n" for line in lines)
+            entry = Unsupported(
+                getattr(stmt, "lineno", None), getattr(stmt, "source", None) or "",
+                f"unsupported statement: {type(stmt).__name__}",
+            )
+        entry.id = f"U{len(unsupported) + 1}"
+        unsupported.append(entry)
+        lines.append(unsupported_marker(entry))
+    return "".join(line + "\n" for line in lines), unsupported
+
+
+def unsupported_marker(entry: Unsupported) -> str:
+    """The single marker line for an unsupported statement. Multi-line source is kept on
+    one line with its newlines written as \\n; the full source is on the entry itself."""
+    source = entry.source.replace("\n", "\\n") if entry.source else f"<{entry.reason}>"
+    return f"% UNSUPPORTED[{entry.id}]: {source}"
 
 
 def _emit_assign(stmt: Assign) -> str:
+    """MATLAB line for an assignment; raises _UnsupportedError if any part can't be translated."""
     target = stmt.targets[0]
-    target_desc = target.id if isinstance(target, Name) else type(target).__name__
+    if len(stmt.targets) != 1 or not isinstance(target, Name):
+        raise _UnsupportedError("assignment target")
     emitter = _ExprEmitter()
-    try:
-        if len(stmt.targets) != 1 or not isinstance(target, Name):
-            raise _UnsupportedError("assignment target")
-        value, _ = emitter.emit(stmt.value)
-    except _UnsupportedError as e:
-        return f"% UNSUPPORTED: {e} in assignment to {target_desc}"
+    value, _ = emitter.emit(stmt.value)
 
     line = f"{target.id} = {value};"
     if emitter.todos:

@@ -3,7 +3,7 @@ import re
 import pytest
 
 from compiler import rules
-from compiler.emit_matlab import emit
+from compiler.emit_matlab import emit, emit_with_unsupported
 from compiler.frontend import lower
 from compiler.shapes import infer
 
@@ -32,11 +32,21 @@ def check(expr, matlab, shape):
     assert inferred == shape
 
 
-def check_no_case(expr):
-    """Lowered fine, but no case matches: placeholder line and unknown shape."""
-    line, inferred = translate(expr)
-    func = re.match(r"(np\.\w+)", expr).group(1)
-    assert line == f"% UNSUPPORTED: {func} with these argument values or shapes in assignment to y"
+def emitter_unsupported(expr):
+    """(last MATLAB line, inferred shape of y, unsupported reasons) for `y = <expr>` after the setup."""
+    module, frontend_unsupported = lower(f"{SETUP}y = {expr}")
+    assert frontend_unsupported == []
+    symbols = infer(module)
+    code, unsupported = emit_with_unsupported(module)
+    return code.splitlines()[-1], symbols["y"], [u.reason for u in unsupported]
+
+
+def check_no_case(expr, func=None):
+    """Lowered fine, but no case matches: one marker line, unknown shape."""
+    func = func or re.match(r"(np\.\w+)", expr).group(1)
+    line, inferred, reasons = emitter_unsupported(expr)
+    assert line == f"% UNSUPPORTED[U1]: y = {expr}"
+    assert reasons == [f"{func} with these argument values or shapes"]
     assert inferred is None
 
 
@@ -187,9 +197,7 @@ def test_reshape(expr, matlab, shape):
 
 @pytest.mark.parametrize("expr", ["np.reshape(A, 6)", "np.reshape(A, (-1, 2))", "A.reshape(6)", "np.reshape(A, (1, 2, 3))"])
 def test_reshape_without_a_case(expr):
-    line, inferred = translate(expr)
-    assert line == "% UNSUPPORTED: np.reshape with these argument values or shapes in assignment to y"
-    assert inferred is None
+    check_no_case(expr, func="np.reshape")
 
 
 # --- Calls with no rule, or arguments the rule doesn't accept, are recorded as Unsupported ---
@@ -209,12 +217,13 @@ def test_np_calls_without_a_rule_are_unsupported(source, reason):
     module, unsupported = lower(f"x = 1\n{source}\nz = 2")
     assert [u.reason for u in unsupported] == [reason]
     infer(module)
-    assert emit(module) == f"x = 1;\n% UNSUPPORTED (line 2): {reason}\nz = 2;\n"
+    assert emit(module) == f"x = 1;\n% UNSUPPORTED[U1]: {source}\nz = 2;\n"
 
 
 def test_non_np_method_without_a_rule_stays_a_generic_call():
-    line, _ = translate("A.cumsum()")
-    assert line == "% UNSUPPORTED: no translation rule for A.cumsum in assignment to y"
+    line, _, reasons = emitter_unsupported("A.cumsum()")
+    assert line == "% UNSUPPORTED[U1]: y = A.cumsum()"
+    assert reasons == ["no translation rule for A.cumsum"]
 
 
 # --- rules.yaml itself ---

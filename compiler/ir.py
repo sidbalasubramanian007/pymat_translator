@@ -36,7 +36,10 @@ class Expr:
 
 @dataclass
 class Stmt:
-    pass
+    # Where the statement came from, so untranslatable ones can be reported with their source
+    # (not part of equality: the same statement from a different place is still equal)
+    lineno: int | None = field(default=None, kw_only=True, compare=False)
+    source: str | None = field(default=None, kw_only=True, compare=False)
 
 
 # --- Expressions ---
@@ -118,10 +121,12 @@ class Assign(Stmt):
 
 @dataclass
 class Unsupported:
-    """A source construct the frontend could not lower into the IR."""
-    lineno: int
+    """A source statement that could not be translated (by the frontend or the emitter)."""
+    lineno: int | None
     source: str
     reason: str
+    # Stable marker id (U1, U2, ...) assigned in source order when emitting
+    id: str | None = field(default=None, kw_only=True, compare=False)
 
 
 @dataclass

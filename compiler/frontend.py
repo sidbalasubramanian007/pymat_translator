@@ -50,6 +50,8 @@ def lower(source: str) -> tuple[Module, list[Unsupported]]:
             unsupported.append(entry)
             continue
         if lowered is not None:
+            lowered.lineno = stmt.lineno
+            lowered.source = ast.get_source_segment(source, stmt) or ""
             module.body.append(lowered)
 
     return module, unsupported

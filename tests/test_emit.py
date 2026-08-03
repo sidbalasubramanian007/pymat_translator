@@ -1,8 +1,8 @@
 import pytest
 
-from compiler.emit_matlab import emit
+from compiler.emit_matlab import emit, emit_with_unsupported
 from compiler.frontend import lower
-from compiler.ir import ArrayLiteral, Assign, BinOp, Const, Module, Name, UnaryOp
+from compiler.ir import ArrayLiteral, Assign, BinOp, Const, Index, Module, Name, UnaryOp
 from compiler.shapes import infer
 
 # Shared setup: s is a scalar, v and w are 1-D (3,), A is (2, 3), B is (3, 4)
@@ -24,6 +24,16 @@ def emit_source(source):
 def emit_line(expr):
     """MATLAB line for `y = <expr>` after the shared setup."""
     return emit_source(f"{SETUP}y = {expr}").splitlines()[-1]
+
+
+def assert_unsupported(source, reason):
+    """The last statement of `source` is the only unsupported one: one marker line, with this reason."""
+    module, _ = lower(source)
+    infer(module)
+    code, unsupported = emit_with_unsupported(module)
+    last_statement = source.strip().splitlines()[-1]
+    assert code.splitlines()[-1] == f"% UNSUPPORTED[U1]: {last_statement}"
+    assert [(u.id, u.reason) for u in unsupported] == [("U1", reason)]
 
 
 def emit_ir(*stmts):
@@ -58,9 +68,7 @@ def test_2d_array_literal():
 
 
 def test_3d_array_literal_is_placeholder():
-    assert emit_source("t = np.array([[[1, 2]], [[3, 4]]])") == (
-        "% UNSUPPORTED: ArrayLiteral that is ragged or has more than 2 dimensions in assignment to t\n"
-    )
+    assert_unsupported("t = np.array([[[1, 2]], [[3, 4]]])", "ArrayLiteral that is ragged or has more than 2 dimensions")
 
 
 def test_name_and_assign():
@@ -177,17 +185,33 @@ def test_power_of_unary_neg_is_parenthesized():
     ("v + A.shape", "Attribute"),
 ])
 def test_unhandled_nodes_become_placeholders(expr, kind):
-    assert emit_line(expr) == f"% UNSUPPORTED: {kind} in assignment to y"
+    assert_unsupported(f"{SETUP}y = {expr}", kind)
 
 
-def test_frontend_unsupported_and_surrounding_statements():
+def test_frontend_and_emitter_unsupported_share_one_marker_format():
     source = "x = 1\nfor i in range(3):\n    x = x * 2\ny = x[0]\nz = x + 1"
-    assert emit_source(source) == (
+    module, _ = lower(source)
+    infer(module)
+    code, unsupported = emit_with_unsupported(module)
+    # Multi-line source stays on its one marker line, with newlines written as \\n
+    assert code == (
         "x = 1;\n"
-        "% UNSUPPORTED (line 2): unsupported statement: For\n"
-        "% UNSUPPORTED: Index into a scalar in assignment to y\n"
+        "% UNSUPPORTED[U1]: for i in range(3):\\n    x = x * 2\n"
+        "% UNSUPPORTED[U2]: y = x[0]\n"
         "z = x + 1;\n"
     )
+    assert [(u.id, u.lineno, u.source, u.reason) for u in unsupported] == [
+        ("U1", 2, "for i in range(3):\n    x = x * 2", "unsupported statement: For"),
+        ("U2", 4, "y = x[0]", "Index into a scalar"),
+    ]
+    assert emit(module) == code
+
+
+def test_marker_without_source_falls_back_to_reason():
+    # IR built by hand has no source text to show
+    module = Module([Assign([Name("x")], Const(1)), Assign([Name("y")], Index(Name("x"), [Const(0)]))])
+    infer(module)
+    assert emit(module) == "x = 1;\n% UNSUPPORTED[U1]: <Index into a scalar>\n"
 
 
 # --- Indexing ---
@@ -259,7 +283,7 @@ def test_negative_step_slices(expr, line):
     ("v[::0]", "slice with a zero or non-constant step"),
 ])
 def test_unsupported_slices(expr, reason):
-    assert emit_index(expr) == f"% UNSUPPORTED: {reason} in assignment to y"
+    assert_unsupported(f"{INDEX_SETUP}y = {expr}", reason)
 
 
 @pytest.mark.parametrize("expr, line", [
@@ -304,9 +328,11 @@ def test_out_of_range_slice_bounds_are_clamped(expr, line):
 
 def test_3d_indexing_is_unsupported():
     # MATLAB keeps singleton dims, so t(2, :, :) would stay 1x3x4
-    assert emit_source("t = np.array([[[1, 2]], [[3, 4]]])\ny = t[1]").splitlines()[-1] == (
-        "% UNSUPPORTED: Index into an array with more than 2 dimensions in assignment to y"
-    )
+    module, _ = lower("t = np.array([[[1, 2]], [[3, 4]]])\ny = t[1]")
+    infer(module)
+    code, unsupported = emit_with_unsupported(module)
+    assert code.splitlines()[-1] == "% UNSUPPORTED[U2]: y = t[1]"
+    assert unsupported[-1].reason == "Index into an array with more than 2 dimensions"
 
 
 def test_unknown_shape_single_index_gets_todo():
@@ -335,4 +361,4 @@ def test_index_inside_expression():
     ("(v + v)[0]", "Index into an expression"),
 ])
 def test_unsupported_indexing(expr, reason):
-    assert emit_index(expr) == f"% UNSUPPORTED: {reason} in assignment to y"
+    assert_unsupported(f"{INDEX_SETUP}y = {expr}", reason)
