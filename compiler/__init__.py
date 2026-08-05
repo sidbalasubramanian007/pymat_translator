@@ -8,6 +8,7 @@ emit_matlab.emit. Statements it can't translate are left as marker lines
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from compiler.emit_matlab import emit_with_unsupported
@@ -33,6 +34,22 @@ class CompileResult:
     unsupported: list[Unsupported]
     stats: CompileStats
     symbol_shapes: dict[str, Shape | None]
+
+
+MARKER_LINE = re.compile(r"^% UNSUPPORTED\[(U\d+)\]: .*$")
+
+
+def splice(matlab_code: str, replacements: dict[str, list[str]]) -> str:
+    """
+    Replaces each "% UNSUPPORTED[Uk]: ..." marker line with replacements["Uk"] (zero or
+    more MATLAB lines). Every other line is kept as is. Raises KeyError if a marker
+    in the code has no replacement.
+    """
+    lines = []
+    for line in matlab_code.splitlines():
+        marker = MARKER_LINE.match(line)
+        lines.extend(replacements[marker.group(1)] if marker else [line])
+    return "".join(line + "\n" for line in lines)
 
 
 def compile_python(source: str) -> CompileResult:
