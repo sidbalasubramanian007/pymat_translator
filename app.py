@@ -8,6 +8,13 @@ st.title("PyMat Translator")
 st.markdown("Automatic Self-Correcting Python-to-MATLAB Translator.")
 st.markdown("---")
 
+# Badge (label, icon, color) for each pipeline path the backend can report
+PATH_BADGES = {
+    "compiler": ("Compiled deterministically", ":material/bolt:", "green"),
+    "hybrid": ("Hybrid", ":material/merge:", "blue"),
+    "llm": ("LLM fallback", ":material/smart_toy:", "orange"),
+}
+
 # Create a split-screen layout
 col1, col2 = st.columns(2)
 
@@ -31,6 +38,9 @@ with col1:
                     # Store the results in session state so they persist on the screen
                     st.session_state['matlab'] = data['final_matlab_code']
                     st.session_state['report'] = data['verification_report']
+                    st.session_state['path'] = data['path']
+                    st.session_state['compile_stats'] = data['compile_stats']
+                    st.session_state['llm_calls'] = data['llm_calls']
                 else:
                     st.error(f"Backend Error: {response.text}")
                     
@@ -43,7 +53,25 @@ with col2:
     # Only show output if we have a successful response stored
     if 'matlab' in st.session_state:
         st.code(st.session_state['matlab'], language="matlab")
-        
+
+        # Pipeline Badge: which path produced the code
+        label, icon, color = PATH_BADGES[st.session_state['path']]
+        st.badge(label, icon=icon, color=color)
+
+        # Pipeline Metrics
+        stats = st.session_state['compile_stats']
+        stat_col, calls_col = st.columns(2)
+        if stats:
+            stat_col.metric(
+                "Compiled without LLM",
+                f"{stats['compiled']}/{stats['total']} statements",
+                f"{stats['percent']:.0f}%",
+                delta_color="off",
+            )
+        else:
+            stat_col.metric("Compiled without LLM", "N/A")
+        calls_col.metric("Gemini Calls", st.session_state['llm_calls'])
+
         report = st.session_state['report']
         
         # Verification Badges
