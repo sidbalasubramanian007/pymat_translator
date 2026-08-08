@@ -39,7 +39,7 @@ def get_client():
 # --- Data Models ---
 
 class TranslationRequest(BaseModel):
-    python_code: str = Field(..., example="import numpy as np\nx = np.array([1, 2, 3])")
+    python_code: str = Field(..., json_schema_extra={"example": "import numpy as np\nx = np.array([1, 2, 3])"})
     notes: str | None = None
 
 class TranslationResponse(BaseModel):
