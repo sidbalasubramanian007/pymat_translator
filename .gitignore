@@ -40,3 +40,5 @@ Icon
 /shared/
 *.mat
 output_data.json
+# Compiler benchmark output (scripts/benchmark.py)
+benchmark_results.json
