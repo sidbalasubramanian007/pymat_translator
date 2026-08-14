@@ -2,7 +2,7 @@ import pytest
 
 from compiler.frontend import lower
 from compiler.ir import (
-    ArrayLiteral, Assign, Attribute, BinOp, Call, Const, Index, Name, Slice, Tuple, Unsupported,
+    ArrayLiteral, Assign, Attribute, BinOp, Call, Const, Index, Name, Slice, Tuple, UnaryOp, Unsupported,
 )
 
 
@@ -111,6 +111,14 @@ def test_negative_constant_is_folded():
     assert lower_value("x = -2.5") == Const(-2.5)
 
 
+def test_unary_minus_on_expression():
+    # Python's ** binds tighter than unary minus: -v ** 2 is -(v ** 2)
+    assert lower_value("c = -v ** 2") == UnaryOp("neg", BinOp("pow", Name("v"), Const(2)))
+    assert lower_value("c = (-v) ** 2") == BinOp("pow", UnaryOp("neg", Name("v")), Const(2))
+    assert lower_value("c = -x") == UnaryOp("neg", Name("x"))
+    assert lower_value("c = +x") == UnaryOp("pos", Name("x"))
+
+
 def test_negative_index_and_slice_bounds():
     assert lower_value("y = a[-1]") == Index(Name("a"), [Const(-1)])
     assert lower_value("y = a[:-1]") == Index(Name("a"), [Slice(None, Const(-1), None)])
@@ -137,7 +145,7 @@ def test_index_into_attribute():
 
 
 @pytest.mark.parametrize("source, reason_part", [
-    ("y = -x", "UnaryOp"),
+    ("y = ~x", "unary operator: Invert"),
     ("y = f(*args)", "*args"),
     ("y = f(**opts)", "**kwargs"),
     ("y = (lambda v: v)(1)", "call target"),

@@ -15,7 +15,8 @@ import ast
 
 from compiler import rules
 from compiler.ir import (
-    ArrayLiteral, Assign, Attribute, BinOp, Call, Const, Expr, Index, Module, Name, Slice, Tuple, Unsupported,
+    ArrayLiteral, Assign, Attribute, BinOp, Call, Const, Expr, Index, Module, Name, Slice, Tuple, UnaryOp,
+    Unsupported,
 )
 
 _BINOPS = {
@@ -25,6 +26,12 @@ _BINOPS = {
     ast.Div: "div",
     ast.Pow: "pow",
     ast.MatMult: "matmul",
+}
+
+# `not` and `~` aren't lowered: on arrays they raise or mean bitwise inversion, not MATLAB's ~
+_UNARYOPS = {
+    ast.USub: "neg",
+    ast.UAdd: "pos",
 }
 
 
@@ -95,6 +102,12 @@ def _lower_expr(node: ast.expr) -> Expr:
         if op is None:
             raise _UnsupportedError(f"unsupported operator: {type(node.op).__name__}")
         return BinOp(op, _lower_expr(node.left), _lower_expr(node.right))
+
+    if isinstance(node, ast.UnaryOp):
+        op = _UNARYOPS.get(type(node.op))
+        if op is None:
+            raise _UnsupportedError(f"unsupported unary operator: {type(node.op).__name__}")
+        return UnaryOp(op, _lower_expr(node.operand))
 
     if isinstance(node, ast.Call):
         func = _dotted_name(node.func)
