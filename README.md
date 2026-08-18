@@ -120,7 +120,7 @@ This corpus was written alongside the compiler, so treat these numbers as a regr
 ### Install
 
 ```bash
-git clone https://github.com/TiggytheTiger007/pymat_translator.git
+git clone https://github.com/sidbalasubramanian007/pymat_translator.git
 cd pymat_translator
 python3.12 -m venv venv
 source venv/bin/activate
