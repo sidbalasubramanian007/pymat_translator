@@ -36,12 +36,8 @@ def _run_container(image: str, command: str, volumes: dict, **kwargs):
     finally:
         container.remove(force=True)
 
-def run_python_and_collect_data(user_code: str) -> dict:
-    """
-    Wraps the user's Python code to serialize global numerical arrays to JSON,
-    executes it inside an isolated container, and returns the data payload.
-    """
-    wrapper_suffix = """
+# Appended to the user's Python; dumps top-level variables to /tmp/output_data.json
+PYTHON_HARNESS = """
 
 # --- SYSTEM AUTOMATED DATA COLLECTION HARNESS ---
 import json
@@ -61,14 +57,23 @@ for var_name, var_val in list(globals().items()):
             "shape": list(var_val.shape), 
             "data": var_val.tolist()
         }
-    elif isinstance(var_val, (int, float)):
+    # NumPy scalars (np.int64 from np.sum of an int array, np.float64, np.bool_) aren't Python
+    # int/float; .item() turns them into one so they serialize and get compared
+    elif isinstance(var_val, np.generic):
+        extracted_data[var_name] = {"type": "scalar", "data": var_val.item()}
+    elif isinstance(var_val, (bool, int, float)):
         extracted_data[var_name] = {"type": "scalar", "data": var_val}
 
 with open('/tmp/output_data.json', 'w') as f:
     json.dump(extracted_data, f)
 """
-    
-    full_code = user_code + wrapper_suffix
+
+def run_python_and_collect_data(user_code: str) -> dict:
+    """
+    Wraps the user's Python code to serialize global numerical arrays to JSON,
+    executes it inside an isolated container, and returns the data payload.
+    """
+    full_code = user_code + PYTHON_HARNESS
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".py") as temp_script:
         temp_script.write(full_code.encode('utf-8'))
